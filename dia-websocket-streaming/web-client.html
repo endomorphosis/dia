@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dia Streaming TTS Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            background-color: white;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            padding: 10px;
+            box-sizing: border-box;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: inherit;
+        }
+        button {
+            padding: 10px 15px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+        }
+        .status {
+            padding: 15px;
+            border-radius: 4px;
+            background-color: #f8f9fa;
+            border-left: 4px solid #6c757d;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+        .file-upload {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px dashed #ccc;
+            border-radius: 4px;
+            background-color: #fafafa;
+        }
+        #voiceSamples {
+            margin-top: 10px;
+        }
+        .sample-item {
+            margin: 5px 0;
+            padding: 5px;
+            background-color: #e9f7ef;
+            border-radius: 4px;
+        }
+        audio {
+            width: 100%;
+        }
+        h3 {
+            margin-bottom: 10px;
+            color: #444;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Dia Streaming TTS</h1>
+        
+        <div>
+            <h3>Text Input</h3>
+            <textarea id="textInput" placeholder="Enter text to convert to speech...">[S1] Hello, I'm Dia! I can generate natural-sounding speech in real-time over WebSockets. [S2] It's really amazing to hear dialogue being created on the fly!</textarea>
+        </div>
+        
+        <div class="file-upload">
+            <h3>Voice Cloning (Optional)</h3>
+            <p>Upload audio samples for voice cloning:</p>
+            <input type="file" id="voiceUpload" accept="audio/*">
+            <div id="voiceSamples"></div>
+        </div>
+        
+        <div class="controls">
+            <button id="generateBtn">Generate Speech</button>
+            <button id="stopBtn" disabled>Stop</button>
+        </div>
+        
+        <div class="status" id="status">Ready</div>
+        
+        <div>
+            <h3>Audio Output</h3>
+            <audio id="audioOutput" controls></audio>
+        </div>
+    </div>
+    
+    <script>
+        // WebSocket connection
+        let socket;
+        let isConnected = false;
+        let isGenerating = false;
+        let audioContext;
+        let audioQueue = [];
+        let audioBufferSource = null;
+        let voiceSample = null;
+        
+        const statusElem = document.getElementById('status');
+        const generateBtn = document.getElementById('generateBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const textInput = document.getElementById('textInput');
+        const audioOutput = document.getElementById('audioOutput');
+        const voiceUpload = document.getElementById('voiceUpload');
+        const voiceSamplesDiv = document.getElementById('voiceSamples');
+        
+        // Connect to WebSocket server
+        function connectWebSocket() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                return Promise.resolve();
+            }
+            
+            return new Promise((resolve, reject) => {
+                // Replace with your server address if needed
+                socket = new WebSocket('ws://localhost:8767');
+                
+                socket.onopen = () => {
+                    isConnected = true;
+                    statusElem.textContent = 'Connected to server';
+                    resolve();
+                };
+                
+                socket.onclose = () => {
+                    isConnected = false;
+                    statusElem.textContent = 'Disconnected from server';
+                };
+                
+                socket.onerror = (error) => {
+                    statusElem.textContent = 'WebSocket error';
+                    reject(error);
+                };
+                
+                socket.onmessage = handleMessage;
+            });
+        }
+        
+        // Audio chunks to collect the complete audio
+        let audioChunks = [];
+        let audioBlob = null;
+        
+        // Handle incoming WebSocket messages
+        async function handleMessage(event) {
+            const data = JSON.parse(event.data);
+            
+            if (data.error) {
+                statusElem.textContent = `Error: ${data.error}`;
+                return;
+            }
+            
+            if (data.audio || data.finished) {
+                handleAudioChunk(data);
+            }
+        }
+        
+        // Process audio chunks from the server
+        function handleAudioChunk(data) {
+            if (data.finished) {
+                statusElem.textContent = 'Audio generation complete';
+                isGenerating = false;
+                generateBtn.disabled = false;
+                stopBtn.disabled = true;
+                
+                // Create a blob from all audio chunks and set it as audio source
+                if (audioChunks.length > 0) {
+                    audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const audioUrl = URL.createObjectURL(audioBlob);
+                    audioOutput.src = audioUrl;
+                }
+                
+                return;
+            }
+            
+            if (!data.audio) return;
+            
+            // Convert base64 audio to audio buffer
+            const audioBytes = atob(data.audio);
+            const audioBuffer = new ArrayBuffer(audioBytes.length);
+            const view = new Uint8Array(audioBuffer);
+            for (let i = 0; i < audioBytes.length; i++) {
+                view[i] = audioBytes.charCodeAt(i);
+            }
+            
+            // Store the chunk for later blob creation
+            audioChunks.push(view.buffer);
+            
+            // Convert to Int16Array as that's what server sends
+            const samples = new Int16Array(audioBuffer);
+            
+            // Convert to Float32Array for AudioBuffer
+            const audioFloat = new Float32Array(samples.length);
+            for (let i = 0; i < samples.length; i++) {
+                audioFloat[i] = samples[i] / 32768.0;  // Convert Int16 to Float32
+            }
+            
+            // Initialize audio context if needed
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: data.sample_rate
+                });
+            }
+            
+            // Create audio buffer for this chunk
+            const buffer = audioContext.createBuffer(1, audioFloat.length, data.sample_rate);
+            buffer.getChannelData(0).set(audioFloat);
+            
+            // Stream approach: play each chunk as it arrives
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.start();
+            
+            // Update status
+            statusElem.textContent = 'Streaming audio...';
+        }
+        
+        // Generate speech from text
+        async function generateSpeech() {
+            if (!textInput.value.trim()) {
+                statusElem.textContent = 'Please enter some text';
+                return;
+            }
+            
+            try {
+                await connectWebSocket();
+                
+                generateBtn.disabled = true;
+                stopBtn.disabled = false;
+                isGenerating = true;
+                statusElem.textContent = 'Generating audio...';
+                
+                // Reset audio chunks
+                audioChunks = [];
+                
+                // Prepare request data
+                const requestData = {
+                    text: textInput.value.trim()
+                };
+                
+                // Add voice sample if available
+                if (voiceSample) {
+                    requestData.audio_prompt = voiceSample;
+                    statusElem.textContent = 'Generating audio with voice cloning...';
+                }
+                
+                // Send request to server
+                socket.send(JSON.stringify(requestData));
+            } catch (error) {
+                console.error('Error:', error);
+                statusElem.textContent = `Error: ${error.message}`;
+                generateBtn.disabled = false;
+            }
+        }
+        
+        // Handle voice sample uploads
+        voiceUpload.addEventListener('change', async (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            try {
+                // Read file as base64
+                voiceSample = await readFileAsBase64(file);
+                
+                // Display in list
+                voiceSamplesDiv.innerHTML = '';
+                const sample = document.createElement('div');
+                sample.className = 'sample-item';
+                sample.textContent = `✓ ${file.name}`;
+                voiceSamplesDiv.appendChild(sample);
+                
+                statusElem.textContent = 'Voice sample loaded';
+            } catch (error) {
+                console.error('Error reading voice sample:', error);
+                statusElem.textContent = `Error loading voice sample: ${error.message}`;
+            }
+        });
+        
+        // Read file as base64
+        function readFileAsBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    // Extract base64 data without the prefix
+                    const base64 = reader.result.split(',')[1];
+                    resolve(base64);
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+        
+        // Event listeners
+        generateBtn.addEventListener('click', generateSpeech);
+        stopBtn.addEventListener('click', () => {
+            if (socket && isConnected) {
+                socket.close();
+            }
+            isGenerating = false;
+            generateBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusElem.textContent = 'Generation stopped';
+        });
+        
+        // Initialize connection on page load
+        window.addEventListener('load', () => {
+            connectWebSocket().catch(error => {
+                statusElem.textContent = 'Failed to connect to server. Check if server is running.';
+            });
+        });
+    </script>
+</body>
+</html>
