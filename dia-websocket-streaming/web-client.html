@@ -140,23 +140,35 @@
             
             return new Promise((resolve, reject) => {
                 // Replace with your server address if needed
-                socket = new WebSocket('ws://localhost:8767');
+                statusElem.textContent = 'Connecting to WebSocket server...';
+                console.log('Attempting to connect to WebSocket server at ws://localhost:8767');
                 
-                socket.onopen = () => {
-                    isConnected = true;
-                    statusElem.textContent = 'Connected to server';
-                    resolve();
-                };
-                
-                socket.onclose = () => {
-                    isConnected = false;
-                    statusElem.textContent = 'Disconnected from server';
-                };
-                
-                socket.onerror = (error) => {
-                    statusElem.textContent = 'WebSocket error';
+                try {
+                    socket = new WebSocket('ws://localhost:8767');
+                    
+                    socket.onopen = () => {
+                        isConnected = true;
+                        statusElem.textContent = 'Connected to server';
+                        console.log('WebSocket connection established');
+                        resolve();
+                    };
+                    
+                    socket.onclose = (event) => {
+                        isConnected = false;
+                        statusElem.textContent = `Disconnected from server (code: ${event.code}, reason: ${event.reason || 'none'})`;
+                        console.log(`WebSocket closed: code ${event.code}, reason: ${event.reason || 'none'}`);
+                    };
+                    
+                    socket.onerror = (error) => {
+                        statusElem.textContent = 'WebSocket error: ' + (error.message || 'Unknown error');
+                        console.error('WebSocket error:', error);
+                        reject(error);
+                    };
+                } catch (error) {
+                    statusElem.textContent = 'Failed to create WebSocket: ' + error.message;
+                    console.error('Failed to create WebSocket:', error);
                     reject(error);
-                };
+                }
                 
                 socket.onmessage = handleMessage;
             });
@@ -200,6 +212,12 @@
             
             if (!data.audio) return;
             
+            // Handle status messages
+            if (data.status) {
+                statusElem.textContent = data.status;
+                return;
+            }
+            
             // Convert base64 audio to audio buffer
             const audioBytes = atob(data.audio);
             const audioBuffer = new ArrayBuffer(audioBytes.length);
@@ -222,20 +240,34 @@
             
             // Initialize audio context if needed
             if (!audioContext) {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                    sampleRate: data.sample_rate
-                });
+                try {
+                    // Use the sample rate from the server
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: data.sample_rate || 24000
+                    });
+                    console.log(`Created AudioContext with sample rate: ${audioContext.sampleRate}Hz`);
+                } catch (error) {
+                    console.error("Error creating AudioContext:", error);
+                    // Fallback to default audio context
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    console.log(`Using default AudioContext with sample rate: ${audioContext.sampleRate}Hz`);
+                }
             }
             
-            // Create audio buffer for this chunk
-            const buffer = audioContext.createBuffer(1, audioFloat.length, data.sample_rate);
-            buffer.getChannelData(0).set(audioFloat);
-            
-            // Stream approach: play each chunk as it arrives
-            const source = audioContext.createBufferSource();
-            source.buffer = buffer;
-            source.connect(audioContext.destination);
-            source.start();
+            try {
+                // Create audio buffer for this chunk
+                const buffer = audioContext.createBuffer(1, audioFloat.length, data.sample_rate);
+                buffer.getChannelData(0).set(audioFloat);
+                
+                // Stream approach: play each chunk as it arrives
+                const source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
+                source.start();
+                console.log(`Playing chunk with ${audioFloat.length} samples at ${data.sample_rate}Hz`);
+            } catch (error) {
+                console.error("Error playing audio chunk:", error);
+            }
             
             // Update status
             statusElem.textContent = 'Streaming audio...';
